@@ -1,12 +1,34 @@
+# # databases:
+# #   - name: todo_db
+# #     databaseName: todo_db
+# #     user: todo_user
+
+# # services:
+# #   - type: web
+# #     name: todo-list-app
+# #     env: python
+# #     buildCommand: "pip install -r requirements.txt && python init_db.py"
+# #     startCommand: "gunicorn app:app"
+# #     envVars:
+# #       - key: PYTHON_VERSION
+# #         value: 3.11.0
+# #       - key: DATABASE_URL
+# #         fromDatabase:
+# #           name: todo_db
+# #           property: connectionString
+
+
 # databases:
-#   - name: todo_db
+#   - name: todo-db
 #     databaseName: todo_db
 #     user: todo_user
+#     plan: free
 
 # services:
 #   - type: web
 #     name: todo-list-app
-#     env: python
+#     runtime: python
+#     plan: free
 #     buildCommand: "pip install -r requirements.txt && python init_db.py"
 #     startCommand: "gunicorn app:app"
 #     envVars:
@@ -14,27 +36,30 @@
 #         value: 3.11.0
 #       - key: DATABASE_URL
 #         fromDatabase:
-#           name: todo_db
+#           name: todo-db
 #           property: connectionString
 
 
-databases:
-  - name: todo-db
-    databaseName: todo_db
-    user: todo_user
-    plan: free
+# render.yaml for Todo List App
+# ✅ Uses SAME database as notes app (notes-db)
 
 services:
   - type: web
     name: todo-list-app
     runtime: python
     plan: free
-    buildCommand: "pip install -r requirements.txt && python init_db.py"
+    buildCommand: "pip install -r requirements.txt"
     startCommand: "gunicorn app:app"
     envVars:
       - key: PYTHON_VERSION
         value: 3.11.0
       - key: DATABASE_URL
+        # ✅ Connect to existing notes-db database
         fromDatabase:
-          name: todo-db
+          name: notes-db
           property: connectionString
+
+# ✅ NO new database created - reusing notes-db
+# Both apps share the same Postgres instance
+# Notes app uses: notes table
+# Todo app uses: todo_users, todo_categories, todo_items tables
