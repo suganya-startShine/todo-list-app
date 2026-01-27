@@ -8,3 +8,14 @@ venv/
 .env
 *.log
 .DS_Store
+# Ignore specific python files
+app2.py
+app3.py
+app5.py
+main.py
+notes.py
+vercelsss.json
+# Do not commit these files
+app.py.save
+app23232.py
+render.yaml

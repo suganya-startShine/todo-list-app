@@ -1,36 +1,120 @@
-# app.py - Todo List Application (Vercel Compatible - FIXED)
-
 from flask import Flask, render_template, request, redirect, url_for, session, flash
 import psycopg2
+from psycopg2.extras import RealDictCursor
 from werkzeug.security import generate_password_hash, check_password_hash
 from datetime import timedelta
 import os
 
 app = Flask(__name__)
-app.secret_key = os.environ.get('SECRET_KEY', os.urandom(24))
+app.secret_key = os.environ.get('SECRET_KEY', 'your-secret-key-change-this-in-production')
 app.permanent_session_lifetime = timedelta(days=7)
 
 def get_db_connection():
-    """Establish database connection with error handling"""
+    """Establish database connection with comprehensive error handling"""
     try:
+        # Try DATABASE_URL first (for deployment platforms like Vercel, Heroku)
         db_url = os.environ.get('DATABASE_URL')
-        print(f"🔵 DATABASE_URL exists: {bool(db_url)}")
         
-        if not db_url:
-            print("❌ DATABASE_URL not set!")
-            return None
-        
-        # Ensure postgresql:// format
-        if db_url.startswith('postgres://'):
-            db_url = db_url.replace('postgres://', 'postgresql://', 1)
-        
-        print(f"🔵 Connecting to database...")
-        conn = psycopg2.connect(db_url)
-        print("✅ Database connected successfully")
-        return conn
+        if db_url:
+            print(f"🔵 Using DATABASE_URL")
+            # Fix postgres:// to postgresql:// (required for psycopg2)
+            if db_url.startswith('postgres://'):
+                db_url = db_url.replace('postgres://', 'postgresql://', 1)
+            
+            print(f"🔵 Connecting to database...")
+            conn = psycopg2.connect(db_url, sslmode='require')
+            print("✅ Database connected successfully via DATABASE_URL")
+            return conn
+        else:
+            # Fallback to individual parameters (for local development)
+            print("🔵 Using individual DB parameters")
+            conn = psycopg2.connect(
+                dbname=os.environ.get('DB_NAME', 'todo_db'),
+                user=os.environ.get('DB_USER', 'todo_user'),
+                password=os.environ.get('DB_PASSWORD', 'thinkpad'),
+                host=os.environ.get('DB_HOST', 'localhost'),
+                port=os.environ.get('DB_PORT', '5432')
+            )
+            print("✅ Database connected successfully via parameters")
+            return conn
+            
     except Exception as e:
         print(f"❌ Database connection error: {e}")
+        print(f"❌ Error type: {type(e).__name__}")
         return None
+
+def init_db():
+    """Initialize database tables if they don't exist"""
+    conn = get_db_connection()
+    if not conn:
+        print("❌ Cannot initialize database - no connection")
+        return False
+    
+    try:
+        cur = conn.cursor()
+        
+        print("🔵 Creating tables if not exist...")
+        
+        # Users table
+        cur.execute('''
+            CREATE TABLE IF NOT EXISTS todo_users (
+                id SERIAL PRIMARY KEY,
+                username VARCHAR(50) UNIQUE NOT NULL,
+                password VARCHAR(255) NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+        
+        # Categories table
+        cur.execute('''
+            CREATE TABLE IF NOT EXISTS todo_categories (
+                id SERIAL PRIMARY KEY,
+                user_id INTEGER REFERENCES todo_users(id) ON DELETE CASCADE,
+                name VARCHAR(100) NOT NULL,
+                color VARCHAR(7) DEFAULT '#667eea',
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(user_id, name)
+            )
+        ''')
+        
+        # Todos table
+        cur.execute('''
+            CREATE TABLE IF NOT EXISTS todo_items (
+                id SERIAL PRIMARY KEY,
+                user_id INTEGER REFERENCES todo_users(id) ON DELETE CASCADE,
+                category_id INTEGER REFERENCES todo_categories(id) ON DELETE SET NULL,
+                title VARCHAR(255) NOT NULL,
+                description TEXT,
+                priority VARCHAR(10) DEFAULT 'medium' CHECK (priority IN ('low', 'medium', 'high')),
+                status VARCHAR(20) DEFAULT 'pending' CHECK (status IN ('pending', 'in_progress', 'completed')),
+                due_date DATE,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+        
+        # Create indexes
+        cur.execute('CREATE INDEX IF NOT EXISTS idx_todos_user_id ON todo_items(user_id)')
+        cur.execute('CREATE INDEX IF NOT EXISTS idx_todos_status ON todo_items(status)')
+        cur.execute('CREATE INDEX IF NOT EXISTS idx_categories_user_id ON todo_categories(user_id)')
+        
+        conn.commit()
+        cur.close()
+        conn.close()
+        
+        print("✅ Database tables initialized successfully")
+        return True
+        
+    except Exception as e:
+        print(f"❌ Database initialization error: {e}")
+        if conn:
+            conn.rollback()
+            conn.close()
+        return False
+
+# Initialize database on startup
+with app.app_context():
+    init_db()
 
 # Routes
 @app.route('/')
@@ -83,9 +167,28 @@ def register():
             print(f"🔵 Creating new user: {username}")
             hashed_password = generate_password_hash(password, method='pbkdf2:sha256')
             cur.execute(
-                'INSERT INTO todo_users (username, password) VALUES (%s, %s)',
+                'INSERT INTO todo_users (username, password) VALUES (%s, %s) RETURNING id',
                 (username, hashed_password)
             )
+            user_id = cur.fetchone()[0]
+            conn.commit()
+            
+            print(f"✅ User created with ID: {user_id}")
+            
+            # Create default categories for new user
+            default_categories = [
+                ('Work', '#667eea'),
+                ('Personal', '#48bb78'),
+                ('Shopping', '#f59e0b'),
+                ('Health', '#ef4444')
+            ]
+            
+            for cat_name, cat_color in default_categories:
+                cur.execute(
+                    'INSERT INTO todo_categories (user_id, name, color) VALUES (%s, %s, %s)',
+                    (user_id, cat_name, cat_color)
+                )
+            
             conn.commit()
             cur.close()
             conn.close()
@@ -166,17 +269,21 @@ def dashboard():
     conn = get_db_connection()
     if not conn:
         flash('Database connection error', 'error')
-        return render_template('dashboard.html', todos=[], categories=[], stats={})
+        return render_template('dashboard.html', todos=[], categories=[], stats={
+            'total': 0, 'completed': 0, 'pending': 0, 'in_progress': 0
+        })
     
     try:
         cur = conn.cursor()
         
+        # Get categories
         cur.execute(
             'SELECT id, name, color FROM todo_categories WHERE user_id = %s ORDER BY name',
             (session['user_id'],)
         )
         categories = cur.fetchall()
         
+        # Get todos
         cur.execute(
             '''SELECT t.id, t.title, t.description, t.priority, t.status, 
                       c.name, c.color, t.due_date, t.created_at
@@ -199,6 +306,7 @@ def dashboard():
         )
         todos = cur.fetchall()
         
+        # Get stats
         cur.execute(
             '''SELECT 
                    COUNT(*) as total,
@@ -219,6 +327,8 @@ def dashboard():
         
         cur.close()
         conn.close()
+        
+        print(f"✅ Dashboard loaded for user {session['username']}")
         return render_template('dashboard.html', todos=todos, categories=categories, stats=stats)
         
     except Exception as e:
@@ -226,7 +336,9 @@ def dashboard():
         if conn:
             conn.close()
         flash('Error loading dashboard', 'error')
-        return render_template('dashboard.html', todos=[], categories=[], stats={})
+        return render_template('dashboard.html', todos=[], categories=[], stats={
+            'total': 0, 'completed': 0, 'pending': 0, 'in_progress': 0
+        })
 
 @app.route('/add', methods=['POST'])
 def add_todo():
@@ -266,6 +378,8 @@ def add_todo():
         conn.commit()
         cur.close()
         conn.close()
+        
+        print(f"✅ Task added: {title}")
         flash('Task added successfully!', 'success')
         
     except Exception as e:
@@ -302,6 +416,7 @@ def update_todo_status(todo_id):
         conn.commit()
         
         if cur.rowcount > 0:
+            print(f"✅ Task {todo_id} status updated to {status}")
             flash('Task status updated!', 'success')
         else:
             flash('Task not found', 'error')
@@ -339,6 +454,7 @@ def delete_todo(todo_id):
         conn.commit()
         
         if cur.rowcount > 0:
+            print(f"✅ Task {todo_id} deleted")
             flash('Task deleted successfully!', 'success')
         else:
             flash('Task not found', 'error')
@@ -383,8 +499,15 @@ def add_category():
         conn.commit()
         cur.close()
         conn.close()
+        
+        print(f"✅ Category added: {name}")
         flash('Category added successfully!', 'success')
         
+    except psycopg2.IntegrityError:
+        if conn:
+            conn.rollback()
+            conn.close()
+        flash('Category already exists', 'error')
     except Exception as e:
         print(f"❌ Add category error: {e}")
         if conn:
@@ -410,7 +533,7 @@ def not_found(e):
 def server_error(e):
     return render_template('500.html'), 500
 
-# Export app for Vercel
+# For Vercel deployment
 app = app
 
 if __name__ == '__main__':
